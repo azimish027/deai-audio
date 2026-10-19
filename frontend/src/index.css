@@ -1,0 +1,268 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ================================================================
+ * 设计令牌（Design Tokens）—— v1.0 · 冻结
+ * 依据：PRODUCT-FRAMEWORK.md §2.2 Step 1
+ * 所有组件和页面禁止硬编码颜色/间距/阴影/字体值，必须通过以下变量。
+ * ================================================================ */
+
+:root {
+  /* ─── 1. Color（语义化色阶，≤8种） ───────────────────────────── */
+  /* 中性色阶 */
+  --color-bg:          #ffffff;   /* 页面背景 */
+  --color-panel:       #fafaf9;   /* 侧面板/卡片背景 */
+  --color-hover:       #efedea;   /* hover 态 */
+  --color-border:      #e9e9e7;   /* 分隔线/边框 */
+  --color-text:        #37352f;   /* 主要文字 */
+  --color-muted:       #6b6b6b;   /* 次要文字 */
+  --color-faint:       #9b9b9b;   /* 辅助文字/禁用 */
+  /* 领域专用色（编曲台深色主题） */
+  --color-timeline-bg:    #0f0f10;
+  --color-track-header:   #151517;
+  /* WaveSurfer（必须是hex，WaveSurfer API不接受CSS变量） */
+  --ws-wave:     #d9d9d7;
+  --ws-progress: #2383e2;
+  --ws-cursor:   #37352f;
+  /* 修复台分段场景语义色 */
+  --scene-monologue-bg:   #efe5d0;  --scene-monologue-fg:   #8a6d1d;
+  --scene-dialogue-bg:    #d4e6f2;  --scene-dialogue-fg:    #2a5e82;
+  --scene-music-bg:       #d7ead0;  --scene-music-fg:       #346a1f;
+  --scene-ambience-bg:    #e0e0de;  --scene-ambience-fg:    #555555;
+  --scene-sfx-bg:         #f2d4d4;  --scene-sfx-fg:         #822a2a;
+  /* 功能色 */
+  --color-primary:     #2383e2;   /* 主操作（主色） */
+  --color-primary-hover: #1d6fd0; /* 主色hover */
+  --color-success:     #0f7b6c;   /* 成功反馈 */
+  --color-danger:      #eb5757;   /* 错误/危险 */
+  --color-warning:    #d4a017;
+  --color-info:        #2383e2;   /* 信息提示（同primary，后续可独立） */
+
+  /* ─── 2. Typography（≤5级） ────────────────────────────────────── */
+  --font-h1:      18px / 1.4   font-weight: 600;
+  --font-h2:      14px / 1.4   font-weight: 600;
+  --font-body:    13px / 1.5   font-weight: 400;
+  --font-caption: 12px / 1.5   font-weight: 400;
+  --font-code:    11px / 1.4   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+
+  /* ─── 3. Spacing（基于 4px 网格，≤6级） ──────────────────────── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* ─── 4. Radius（≤4级） ──────────────────────────────────────── */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 16px;
+  --radius-full: 9999px;
+
+  /* ─── 5. Elevation（≤4级） ────────────────────────────────────── */
+  --shadow-flat:    none;
+  --shadow-sm:      0 1px 2px rgba(15,15,15,0.04);
+  --shadow-raised:  0 2px 8px rgba(15,15,15,0.08);
+  --shadow-overlay: 0 8px 24px rgba(15,15,15,0.16);
+
+  /* ─── 6. Motion（≤3级） ──────────────────────────────────────── */
+  --transition-fast: 150ms;
+  --transition-med:  250ms;
+  --transition-slow: 400ms;
+  --ease-out:        cubic-bezier(0.25, 0.8, 0.25, 1);
+  --ease-in-out:     cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* 深色模式预留（后续可启用） */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg:          #191919;
+    --color-panel:       #252526;
+    --color-hover:       #2d2d2d;
+    --color-border:      #363636;
+    --color-text:        #e6e6e6;
+    --color-muted:       #a0a0a0;
+    --color-faint:       #6e6e6e;
+  }
+}
+
+/* prefers-reduced-motion：禁用所有动画和过渡（框架§2.3要求） */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ─── Notion 风格基础重置 ──────────────────────────────────────── */
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-family: "Inter", "PingFang SC", "Helvetica Neue", system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* ─── 自定义背景图独立层（html::before） ─────────────────────────
+ * 核心设计：
+ *   - 用伪元素做独立背景层，opacity / blur 只作用在这一层
+ *   - 绝不给 html/body/#root 加 opacity（会把所有内容一起变淡）
+ *   - position: fixed; inset: 0; z-index: -1 → 在所有内容下面
+ *   - pointer-events: none → 不拦截点击事件
+ *   - 背景图 + 模糊 + 透明度全部由主题引擎生成的 CSS 变量驱动
+ *   - 无背景图时 --bg-custom-image = none + --bg-custom-opacity = 0 → 透明
+ */
+html::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image: var(--bg-custom-image, none);
+  background-size: var(--bg-custom-size, cover);
+  background-position: var(--bg-custom-position, center center);
+  background-repeat: no-repeat;
+  opacity: var(--bg-custom-opacity, 0);
+  filter: blur(var(--bg-custom-blur, 0px));
+  /* 让背景图叠在 Notion 白色底板之下，保留应用的主要背景色做对比 */
+  mix-blend-mode: normal;
+}
+
+/* 全局过渡：只对 color/bg/border/opacity 做轻量过渡，禁用 scale/translate */
+* {
+  transition-property: color, background-color, border-color, opacity;
+  transition-duration: var(--transition-fast);
+  transition-timing-function: var(--ease-out);
+}
+
+.no-transform-hover *:hover {
+  transform: none !important;
+}
+
+/* ─── 组件基础样式（原子层） ────────────────────────────────────── */
+@layer components {
+  /* Button：四个层级 + 7种状态 */
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 h-8 px-3 text-[13px]
+           rounded-md border border-transparent cursor-pointer select-none
+           font-medium;
+    transition-property: background-color, color, border-color, opacity;
+    transition-duration: var(--transition-fast);
+    transition-timing-function: var(--ease-out);
+  }
+  .btn:hover    { opacity: 0.92; }
+  .btn:active   { transform: none; opacity: 0.85; }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn[data-loading="true"] { opacity: 0.6; cursor: progress; }
+
+  .btn-primary {
+    @apply btn text-white;
+    background-color: var(--color-primary);
+    border-color: var(--color-primary);
+  }
+  .btn-primary:hover { background-color: var(--color-primary-hover); border-color: var(--color-primary-hover); }
+
+  .btn-secondary {
+    @apply btn text-notion-text border border-notion-border;
+    background-color: var(--color-bg);
+  }
+  .btn-secondary:hover { background-color: var(--color-hover); }
+
+  .btn-danger {
+    @apply btn text-white;
+    background-color: var(--color-danger);
+    border-color: var(--color-danger);
+  }
+
+  .btn-ghost {
+    @apply btn text-notion-muted;
+    background-color: transparent;
+  }
+  .btn-ghost:hover { background-color: var(--color-hover); color: var(--color-text); }
+
+  /* Input */
+  .input {
+    @apply h-8 px-2 text-[13px] border border-notion-border rounded-md
+           bg-transparent text-notion-text placeholder-notion-faint;
+    transition-property: border-color;
+    transition-duration: var(--transition-fast);
+  }
+  .input:focus   { outline: none; border-color: var(--color-primary); }
+  .input:disabled{ opacity: 0.5; cursor: not-allowed; }
+  .input[data-error="true"] { border-color: var(--color-danger); }
+
+  /* Card */
+  .card {
+    @apply border border-notion-border rounded-md;
+    background-color: var(--color-panel);
+    box-shadow: var(--shadow-flat);
+  }
+  .card-raised {
+    @apply card;
+    box-shadow: var(--shadow-sm);
+  }
+  .card-overlay {
+    @apply card rounded-lg;
+    box-shadow: var(--shadow-overlay);
+  }
+
+  /* Badge / Chip */
+  .badge {
+    @apply inline-flex items-center h-5 px-2 text-[11px]
+           border border-notion-border rounded-sm text-notion-muted bg-notion-panel;
+  }
+  .badge-primary {
+    @apply badge text-white;
+    background-color: var(--color-primary);
+    border-color: var(--color-primary);
+  }
+  .badge-success {
+    @apply badge text-white;
+    background-color: var(--color-success);
+    border-color: var(--color-success);
+  }
+  .badge-danger {
+    @apply badge text-white;
+    background-color: var(--color-danger);
+    border-color: var(--color-danger);
+  }
+
+  /* Divider */
+  .divider {
+    @apply h-px w-full;
+    background-color: var(--color-border);
+  }
+
+  /* ─── 旧类名兼容别名（零破坏迁移） ──────────────────────────── */
+  /* 这些类名被旧组件广泛引用，保留别名让迁移渐进进行 */
+  .notion-btn          { @apply btn-secondary; }
+  .notion-btn-primary  { @apply btn-primary; }
+  .notion-input        { @apply input; }
+  .notion-card         { @apply card; }
+  .notion-divider      { @apply divider; }
+  .notion-chip         { @apply badge; }
+
+  /* Spinner (按钮内 Loading 态) */
+  .spinner {
+    @apply inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full;
+    animation: spin 0.6s linear infinite;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+}
+
+/* WaveSurfer 主题覆写（对齐令牌） */
+.wavesurfer-container {
+  --ws-primary-color: var(--color-primary);
+  --ws-secondary-color: var(--color-border);
+}
