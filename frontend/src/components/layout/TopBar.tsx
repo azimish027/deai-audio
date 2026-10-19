@@ -9,6 +9,7 @@ import { useUIStore } from "../../stores/uiStore";
 import { useIsMobile, useIsTablet } from "../../hooks/useResponsive";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 import { ThemeSwitcher } from "../ThemeSwitcher";
+import { AISettings } from "../AISettings";
 
 export function TopBar() {
   const backendOk = useEngineStore((s) => s.backend_ok);
@@ -111,7 +112,8 @@ export function TopBar() {
         )}
       </div>
 
-      {/* 右组 4：主题切换器 */}
+      {/* 右组 4：AI 设置 + 主题切换器 */}
+      <AISettings />
       <ThemeSwitcher />
     </header>
   );
