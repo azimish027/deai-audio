@@ -36,6 +36,7 @@ export interface SessionResult {
   diagnosis: DiagnosisInfo;
   segments: { start_s: number; end_s: number; scene_label: string; confidence: number }[];
   exports: { wav?: string; m4a?: string; mp3?: string };
+  measurements?: unknown;   // 后端 pipeline.py 返回的每步 before/after/step-deltas
 }
 
 // ---- 基础 HTTP ----

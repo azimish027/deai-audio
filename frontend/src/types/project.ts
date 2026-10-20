@@ -280,4 +280,35 @@ export interface RepairSession {
   segments: { start_s: number; end_s: number; scene_label: string; confidence: number }[];
   exports: { wav?: string; m4a?: string; mp3?: string };
   created_at: number;
+  measurements?: RepairMeasurements;   // 新增：每步 before/after/step-deltas
+}
+
+/** 仪表盘 + 步骤卡共享的 measurements 类型（后端 pipeline.py 直接返回） */
+export interface RepairMeasurements {
+  before: MetricSnapshot;                  // 解码后第一次全量测量
+  after: MetricSnapshot;                   // 全部跑完后的终态测量
+  steps: StepMeasurement[];                // 每步 before/after/delta
+  lufs_target: number;                     // 模板给的目标 LUFS
+  true_peak_limit_dbtp: number;            // 模板给的真峰值限幅
+  template_id: string;
+}
+
+export interface MetricSnapshot {
+  lufs: number | null;
+  true_peak_dbtp: number | null;
+  phase_entropy: number | null;
+  spectrum_flatness: number | null;
+  rms_dbfs: number | null;
+}
+
+export interface StepMeasurement {
+  step_id: string;
+  name: string;                    // 人话名称，如 "降噪"
+  explain: string;                 // 人话解释
+  human: string;                   // 更具体的一句人话，带 before/after
+  status: 'ok' | 'skipped' | 'error';
+  note: string;                    // error 时的 message
+  before: Partial<MetricSnapshot>;
+  after: Partial<MetricSnapshot>;
+  delta: Partial<Record<keyof MetricSnapshot, number | null>>;
 }

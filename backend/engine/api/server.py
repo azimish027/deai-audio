@@ -39,6 +39,7 @@ class SessionInfo(BaseModel):
     diagnosis: dict
     segments: list
     exports: dict
+    measurements: dict = {}   # 新增：before/after/steps/lufs_target/true_peak_limit
 
 
 @app.post("/process", response_model=SessionInfo)
@@ -73,6 +74,7 @@ async def process_audio(file: UploadFile = File(...),
         },
         segments=sess.to_dict()["segments"],
         exports={k: v for k, v in sess.exports.__dict__.items() if v},
+        measurements=getattr(sess, "measurements", {}),
     )
 
 

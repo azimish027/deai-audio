@@ -1,4 +1,8 @@
-"""完整处理链编排 + 降级矩阵。"""
+"""完整处理链编排 + 降级矩阵。
+
+扩展：每步跑前跑后测同一组指标，把 before / after / delta 塞进
+session.measurements，供前端仪表盘、步骤卡、A/B 对比使用。
+"""
 from __future__ import annotations
 
 import os
@@ -29,17 +33,230 @@ from ..dsp.truepeak_limiter import truepeak_limit
 from ..loudness.normalize import loudness_normalize
 
 
+# ============================================================
+# 指标测量工具（无依赖，纯 numpy / pyloudnorm）
+# ============================================================
+
+def _measure_audio(audio: np.ndarray, sr: int) -> dict:
+    """对一段音频测核心指标。任何子指标测量失败都优雅回退。"""
+    if audio is None or audio.size == 0:
+        return {"lufs": None, "true_peak_dbtp": None, "phase_entropy": None,
+                "spectrum_flatness": None, "rms_dbfs": None}
+
+    mono = audio if audio.ndim == 1 else audio.mean(axis=1)
+
+    # RMS dBFS（近似）
+    try:
+        rms = float(np.sqrt(np.mean(mono ** 2)))
+        rms_dbfs = 20.0 * np.log10(max(rms, 1e-12))
+    except Exception:
+        rms_dbfs = None
+
+    # True peak（简单插值近似——不做完整 4x oversampling，够用）
+    try:
+        peak = float(np.max(np.abs(audio)))
+        true_peak_dbtp = 20.0 * np.log10(max(peak, 1e-12))
+    except Exception:
+        true_peak_dbtp = None
+
+    # LUFS（EBU R128 —— 可选 pyloudnorm，没装就用 RMS 近似）
+    lufs = None
+    try:
+        import pyloudnorm as pyln
+        meter = pyln.Meter(sr)
+        measure_in = audio[:, None] if audio.ndim == 1 else audio
+        lufs = float(meter.integrated_loudness(measure_in))
+    except Exception:
+        try:
+            # 粗略近似：LUFS ≈ RMS dBFS - 0.691（K-weighting 常数）
+            if rms_dbfs is not None:
+                lufs = rms_dbfs - 0.7
+        except Exception:
+            pass
+
+    # 相位熵（1-bit 符号 + 相邻差分）
+    try:
+        sign = np.sign(mono)
+        d = sign[1:] != sign[:-1]
+        counts = np.bincount(d.astype(int))
+        p = counts / max(counts.sum(), 1)
+        phase_entropy = float(-np.sum(p * np.log2(p + 1e-12)))
+        # 归一化到 [0, 1]（log2(2) = 1 上限）
+        phase_entropy = min(1.0, phase_entropy)
+    except Exception:
+        phase_entropy = None
+
+    # 频谱平坦度
+    spectrum = np.abs(np.fft.rfft(mono[:sr * 5])) if len(mono) >= sr * 5 else np.abs(np.fft.rfft(mono))
+    spectrum = spectrum + 1e-12
+    try:
+        geo_mean = float(np.exp(np.mean(np.log(spectrum))))
+        ari_mean = float(np.mean(spectrum))
+        spectrum_flatness = geo_mean / ari_mean if ari_mean > 0 else None
+    except Exception:
+        spectrum_flatness = None
+
+    return {
+        "lufs": lufs,
+        "true_peak_dbtp": true_peak_dbtp,
+        "phase_entropy": phase_entropy,
+        "spectrum_flatness": spectrum_flatness,
+        "rms_dbfs": rms_dbfs,
+    }
+
+
+def _delta_str(before: float | None, after: float | None) -> str:
+    if before is None or after is None:
+        return "—"
+    d = after - before
+    sign = "+" if d > 0 else ""
+    return f"{sign}{d:.2f}"
+
+
+# ============================================================
+# Pipeline Step 元信息（给前端步骤卡用人话解释）
+# ============================================================
+
+STEP_META: dict[str, dict] = {
+    "decode": {
+        "name": "解码 + 48kHz 重采样",
+        "explain": "WAV/MP3/M4A/FLAC → 48kHz 浮点，统一采样率方便后续处理。",
+    },
+    "dc_offset": {
+        "name": "DC Offset 去除",
+        "explain": "把波形整体归零，避免后续处理产生偏置。",
+    },
+    "declip": {
+        "name": "削波修复",
+        "explain": "稀疏重建削波峰值，把 >0.99 的样本拉回到正常范围。",
+    },
+    "separation": {
+        "name": "源分离（Demucs）",
+        "explain": "把人声/鼓/贝斯/其他分开，每条轨道单独处理再混音。",
+    },
+    "denoise": {
+        "name": "降噪（DeepFilterNet）",
+        "explain": "深度学习模型压制背景噪声，保留人声清晰。",
+    },
+    "deverb": {
+        "name": "去混响",
+        "explain": "湿声残留过高的部分，保留 15% 自然空间感。",
+    },
+    "transient_restore": {
+        "name": "瞬态恢复",
+        "explain": "把起音瞬间补到目标 dB，让咬字更利落。",
+    },
+    "deesser": {
+        "name": "去齿音",
+        "explain": "压缩高频刺耳的 s/z 发音，保留清晰度。",
+    },
+    "loudness_normalize": {
+        "name": "响度标准化（EBU R128）",
+        "explain": "双遍测量 + 线性增益，对齐到模板目标 LUFS。",
+    },
+    "true_peak_limit": {
+        "name": "True Peak 限幅",
+        "explain": "防止编码过冲，把真峰值压到 -1.0 dBTP 以下。",
+    },
+}
+
+
+def _human_step_sentence(step_id: str, before: dict, after: dict) -> str:
+    """根据 before/after 自动生成一句人话。"""
+    meta = STEP_META.get(step_id, {})
+    base = meta.get("explain", "")
+
+    if step_id == "loudness_normalize":
+        b, a = before.get("lufs"), after.get("lufs")
+        if b is not None and a is not None:
+            return f"响度从 {b:.1f} LUFS → {a:.1f} LUFS，{base}"
+    elif step_id == "denoise":
+        b, a = before.get("spectrum_flatness"), after.get("spectrum_flatness")
+        if b is not None and a is not None and b > a:
+            return f"噪声成分下降（平坦度 {b:.2f}→{a:.2f}），{base}"
+    elif step_id == "transient_restore":
+        b, a = before.get("phase_entropy"), after.get("phase_entropy")
+        if b is not None and a is not None and a > b:
+            return f"相位熵 {b:.2f}→{a:.2f}，咬字更自然，{base}"
+    elif step_id == "true_peak_limit":
+        b, a = before.get("true_peak_dbtp"), after.get("true_peak_dbtp")
+        if b is not None and a is not None and b > -1.0:
+            return f"真峰值 {b:.1f}→{a:.1f} dBTP，防编码过冲，{base}"
+    elif step_id == "declip":
+        b, a = before.get("true_peak_dbtp"), after.get("true_peak_dbtp")
+        if b is not None and a is not None:
+            return f"削波峰值 {b:.1f}→{a:.1f} dBTP，{base}"
+
+    return base
+
+
 class Pipeline:
-    """完整处理链。任何单模块失败都不阻塞导出。"""
+    """完整处理链。任何单模块失败都不阻塞导出。
+
+    扩展：每步 before/after 指标自动塞进 session.measurements，结构：
+        {
+          "before": { ...解码后第一次全量测量 },
+          "after":  { ...全部跑完后的终态测量 },
+          "steps": [
+            { step_id, name, status, human,
+              before: {lufs, true_peak_dbtp, phase_entropy, spectrum_flatness, rms_dbfs},
+              after:  { ...},
+              delta:  { ...}
+            }, ...
+          ],
+          "lufs_target": -16.0,   # 来自模板
+          "true_peak_limit_dbtp": -1.0
+        }
+    """
 
     def __init__(self, tmp_dir: Optional[str] = None):
         self._tmp_dir = tmp_dir or tempfile.mkdtemp(prefix="deai_pipeline_")
 
+    # ───────── 统一的 step 测量 helper ─────────
+    def _record_step(self, sess: Session, step_id: str,
+                     audio_before: np.ndarray | None,
+                     audio_after: np.ndarray | None,
+                     status: str = "ok", note: str = "") -> None:
+        sr = sess.working.get("sr", 48000)
+        before = _measure_audio(audio_before, sr) if audio_before is not None else {}
+        after = _measure_audio(audio_after, sr) if audio_after is not None else {}
+        delta = {}
+        for k in ("lufs", "true_peak_dbtp", "phase_entropy", "spectrum_flatness", "rms_dbfs"):
+            b = before.get(k)
+            a = after.get(k)
+            if b is not None and a is not None:
+                delta[k] = round(a - b, 4)
+            else:
+                delta[k] = None
+        meta = STEP_META.get(step_id, {})
+        sess.measurements["steps"].append({
+            "step_id": step_id,
+            "name": meta.get("name", step_id),
+            "explain": meta.get("explain", ""),
+            "human": _human_step_sentence(step_id, before, after),
+            "status": status,
+            "note": note,
+            "before": before,
+            "after": after,
+            "delta": delta,
+        })
+
+    # ───────── 主流程 ─────────
     def run(self, src_path: str, template_id: str = "studio_vocal") -> Session:
         sess = Session()
         sess.source.path = src_path
         sess.template_id = template_id
         sess.tmp_dir = self._tmp_dir
+        sess.measurements = {  # type: ignore[attr-defined]  # 运行时动态字段
+            "before": {},
+            "after": {},
+            "steps": [],
+            "lufs_target": TEMPLATES.get(template_id, {}).get("il_target_lufs", -16.0),
+            "true_peak_limit_dbtp": TRUE_PEAK_LIMIT_WAV_DBTP,
+            "template_id": template_id,
+        }
+
+        tmpl = TEMPLATES.get(template_id, TEMPLATES["studio_vocal"])
 
         # ── 1. 解码 ──
         sess.state = PipelineState.UPLOADED
@@ -49,49 +266,62 @@ class Pipeline:
             raise RuntimeError(f"Decode failed: {e}")
         sess.state = PipelineState.DECODED
 
+        # 解码后的全量 before 快照
+        sess.measurements["before"] = _measure_audio(sess.working["wav"], sess.working["sr"])
+
         # ── 2. DC 去除 ──
         try:
-            sess.working["wav"] = remove_dc_offset(sess.working["wav"])
-        except Exception:
-            pass
+            audio_in = sess.working["wav"]
+            audio_out = remove_dc_offset(audio_in)
+            sess.working["wav"] = audio_out
+            self._record_step(sess, "dc_offset", audio_in, audio_out, "ok")
+        except Exception as e:
+            self._record_step(sess, "dc_offset", None, None, "skipped", str(e))
 
         # ── 3. 削波修复 ──
         try:
-            sess.working["wav"] = declip_sparse(
-                sess.working["wav"], sess.working["sr"]
-            )
-        except Exception:
-            pass
+            audio_in = sess.working["wav"]
+            audio_out = declip_sparse(audio_in, sess.working["sr"])
+            sess.working["wav"] = audio_out
+            self._record_step(sess, "declip", audio_in, audio_out, "ok")
+        except Exception as e:
+            self._record_step(sess, "declip", None, None, "skipped", str(e))
 
-        # ── 4. 诊断 ──
+        # ── 4. 诊断（不处理音频，只测量） ──
         try:
             sess.diagnosis = build_diagnosis_report(sess)
         except Exception:
             traceback.print_exc()
         sess.state = PipelineState.DIAGNOSED
 
-        # ── 5. 源分离（可回退全混音） ──
+        # ── 5. 源分离 ──
         try:
+            audio_in = sess.working["wav"]
             sess = separate_session(sess)
-        except Exception:
+            audio_out = sess.working["wav"]
+            self._record_step(sess, "separation", audio_in, audio_out, "ok")
+        except Exception as e:
             sess.stems = type(sess.stems)()
+            self._record_step(sess, "separation", None, None, "skipped", str(e))
         sess.state = PipelineState.SEPARATED
 
         # ── 6. 分段 ──
         try:
             sess = segment_session(sess)
         except Exception:
-            # 退化：整文件一个段
             sess.segments = [SceneSegment(0.0, sess.source.duration_s, SceneLabel.MONOLOGUE, 0.5)]
         sess.state = PipelineState.SEGMENTED
 
         # ── 7. 模板 DSP 链 ──
-        sess = self._apply_template_chain(sess)
+        sess = self._apply_template_chain(sess, tmpl)
         sess.state = PipelineState.PROCESSING
 
         # ── 8. 标准化 ──
-        sess = self._apply_normalize(sess)
+        sess = self._apply_normalize(sess, tmpl)
         sess.state = PipelineState.NORMALIZED
+
+        # 终态 after 快照
+        sess.measurements["after"] = _measure_audio(sess.working["wav"], sess.working["sr"])
 
         # ── 9. 导出 ──
         out_dir = os.path.join(self._tmp_dir, "exports")
@@ -103,51 +333,55 @@ class Pipeline:
 
         return sess
 
-    def _apply_template_chain(self, sess: Session) -> Session:
-        tmpl = TEMPLATES.get(sess.template_id, TEMPLATES["studio_vocal"])
+    def _apply_template_chain(self, sess: Session, tmpl: dict) -> Session:
         audio = sess.working["wav"]
         sr = sess.working["sr"]
-
-        # 全混音时强度降低 20%
         stem_factor = 1.0 if sess.stems.vocals is not None else 0.8
 
         # 7a. 降噪
         try:
+            audio_in = audio
             audio = apply_denoise(sess, tmpl["denoise_strength"] * stem_factor).working["wav"]
-        except Exception:
-            pass
+            self._record_step(sess, "denoise", audio_in, audio, "ok")
+        except Exception as e:
+            self._record_step(sess, "denoise", None, None, "skipped", str(e))
 
         # 7b. 去混响
         try:
+            audio_in = audio
             audio = apply_deverb(audio, sr, wet_retention=tmpl["deverb_wet_retention"])
-        except Exception:
-            pass
+            self._record_step(sess, "deverb", audio_in, audio, "ok")
+        except Exception as e:
+            self._record_step(sess, "deverb", None, None, "skipped", str(e))
 
         # 7c. 瞬态恢复
         try:
+            audio_in = audio
             audio = transient_restore(
                 audio, sr,
                 target_transient_db=tmpl["transient_target_db"],
                 max_restore_db=tmpl["transient_max_restore_db"],
             )
-        except Exception:
-            pass
+            self._record_step(sess, "transient_restore", audio_in, audio, "ok")
+        except Exception as e:
+            self._record_step(sess, "transient_restore", None, None, "skipped", str(e))
 
         # 7d. 去齿音
         try:
+            audio_in = audio
             audio = deesser(audio, sr, level=tmpl["deesser_level"])
+            self._record_step(sess, "deesser", audio_in, audio, "ok")
+        except Exception as e:
+            self._record_step(sess, "deesser", None, None, "skipped", str(e))
+
+        # 7e. 音高修正（默认关闭，record 但音频不变）
+        try:
+            _ = pitch_correct_via_tdpsola(audio, sr, f0_shift_cents=0.0, enable=False)
         except Exception:
             pass
 
-        # 7e. 音高修正（共振峰保留）
+        # 7f. 微瑕疵注入（不记 step —— 是"增真"不处理音频质量指标）
         try:
-            audio = pitch_correct_via_tdpsola(audio, sr, f0_shift_cents=0.0, enable=False)
-        except Exception:
-            pass
-
-        # 7f. 微瑕疵注入
-        try:
-            # 根据第一段场景判断
             scene_label = sess.segments[0].scene_label.value if sess.segments else "monologue"
             audio = inject_micro_imperfections(
                 audio, sr, scene_label=scene_label,
@@ -159,26 +393,27 @@ class Pipeline:
         sess.working["wav"] = audio
         return sess
 
-    def _apply_normalize(self, sess: Session) -> Session:
-        tmpl = TEMPLATES.get(sess.template_id, TEMPLATES["studio_vocal"])
+    def _apply_normalize(self, sess: Session, tmpl: dict) -> Session:
         audio = sess.working["wav"]
         sr = sess.working["sr"]
 
-        # 8a. 双遍标准化
+        # 8a. 响度标准化
         try:
+            audio_in = audio
             audio, il, lra = loudness_normalize(audio, sr, target_lufs=tmpl["il_target_lufs"])
             sess.diagnosis.mechanical_signature.lra_lu = lra
-        except Exception:
-            pass
+            self._record_step(sess, "loudness_normalize", audio_in, audio, "ok")
+        except Exception as e:
+            self._record_step(sess, "loudness_normalize", None, None, "skipped", str(e))
 
-        # 8b. WAV TP 限制
+        # 8b. True Peak 限制
         try:
+            audio_in = audio
             audio = truepeak_limit(audio, sr, limit_dbfs=TRUE_PEAK_LIMIT_WAV_DBTP)
-        except Exception:
-            pass
+            self._record_step(sess, "true_peak_limit", audio_in, audio, "ok")
+        except Exception as e:
+            self._record_step(sess, "true_peak_limit", None, None, "skipped", str(e))
 
-        # 8c. 给 M4A/MP3 留额外余量（导出环节会再编码，限幅器应先让 WAV 也留有余量）
-        # 这里用统一 -1.5 dBTP，后续 export_all 编码前再归一化到 -1.0 peak
         sess.working["wav"] = audio
         return sess
 
