@@ -241,6 +241,61 @@ class Pipeline:
             "delta": delta,
         })
 
+
+    def _detect_breath_frames(self, audio: np.ndarray, sr: int,
+                              win_ms: int = 20, rms_db_threshold: float = -42.0,
+                              drop_ratio: float = 0.3) -> np.ndarray:
+        """
+        检测气口/尾音帧。返回 bool mask（shape == audio.shape，False=正常，True=气口）。
+        逻辑：短窗 RMS < -42dBFS 且 RMS 比前后窗 drop > 30% → 气口候选。
+        纯能量-based，无需 f0 检测。
+        """
+        if audio is None or len(audio) < sr * 0.1:
+            return np.zeros(len(audio), dtype=bool)
+
+        mono = audio if audio.ndim == 1 else audio.mean(axis=1)
+        win = int(sr * win_ms / 1000)
+        if win < 1:
+            return np.zeros(len(mono), dtype=bool)
+
+        n_windows = len(mono) // win
+        if n_windows < 3:
+            return np.zeros(len(mono), dtype=bool)
+
+        # 窗级 RMS
+        rms = np.array([
+            float(np.sqrt(np.mean(mono[i * win:(i + 1) * win] ** 2)))
+            for i in range(n_windows)
+        ])
+        rms_db = 20.0 * np.log10(rms + 1e-10)
+
+        # 气口候选：当前窗 RMS 低于阈值，且比前后窗 drop > drop_ratio
+        breath_windows = np.zeros(n_windows, dtype=bool)
+        for i in range(1, n_windows - 1):
+            if rms_db[i] < rms_db_threshold:
+                forward_drop = (rms[i - 1] - rms[i]) / (rms[i - 1] + 1e-10)
+                backward_drop = (rms[i + 1] - rms[i]) / (rms[i + 1] + 1e-10)
+                if forward_drop > drop_ratio or backward_drop > drop_ratio:
+                    breath_windows[i] = True
+
+        # 扩展 1 窗左右（气口不是 1 个窗，是一段）
+        expanded = breath_windows.copy()
+        for i in range(1, n_windows - 1):
+            if breath_windows[i]:
+                expanded[max(0, i - 1)] = True
+                expanded[min(n_windows - 1, i + 1)] = True
+
+        # 展开到样本级
+        frame_mask = np.zeros(len(mono), dtype=bool)
+        for i in range(n_windows):
+            if expanded[i]:
+                frame_mask[i * win:(i + 1) * win] = True
+
+        # 多声道适配
+        if audio.ndim == 2:
+            return np.tile(frame_mask[:, None], (1, audio.shape[1]))
+        return frame_mask
+
     # ───────── 主流程 ─────────
     def run(
         self,
@@ -288,12 +343,20 @@ class Pipeline:
         pitch_enabled_hp = False   # 默认不修音（反直觉点）
         pitch_tol_hp = hp.get("pitch_tolerance_cents", hp_default.get("pitch_tolerance_cents", 15))
         loudness_tol_hp = hp.get("loudness_tolerance_lufs", hp_default.get("loudness_tolerance_lufs", 1.5))
+        keep_breath_hp = hp.get("keep_breath", hp_default.get("keep_breath", True))
+        keep_slur_hp = hp.get("keep_slur", hp_default.get("keep_slur", True))
+        dynamic_wide_hp = hp.get("dynamic_wide", hp_default.get("dynamic_wide", True))
+        target_lufs_hp = tmpl.get("il_target_lufs", -16.0)
 
         if hp_on:
             denoise_strength_hp *= hp.get("denoise_strength_mult", hp_default.get("denoise_strength_mult", 0.6))
             deverb_wet_hp *= hp.get("deverb_wet_retention_mult", hp_default.get("deverb_wet_retention_mult", 1.5))
             # 修音只在"偏差 > tolerance"时才触发（故意留微偏差）
-            pitch_enabled_hp = hp.get("pitch_correct", hp_default.get("pitch_correct", True))
+            # keep_slur=True 时不修音（不修音 = 自然保留滑音）
+            pitch_enabled_hp = (
+                hp.get("pitch_correct", hp_default.get("pitch_correct", True))
+                and not keep_slur_hp   # 保留滑音 → 不修音
+            )
 
         sess.measurements = {  # type: ignore[attr-defined]  # 运行时动态字段
             "before": {},
@@ -315,6 +378,10 @@ class Pipeline:
             "pitch_enabled": pitch_enabled_hp,
             "pitch_tol_cents": pitch_tol_hp,
             "loudness_tol_lufs": loudness_tol_hp,
+            "keep_breath": keep_breath_hp,
+            "keep_slur": keep_slur_hp,
+            "dynamic_wide": dynamic_wide_hp,
+            "target_lufs": target_lufs_hp,
         }
 
         # ── 1. 解码（不能关） ──
@@ -420,12 +487,29 @@ class Pipeline:
         sr = sess.working["sr"]
         stem_factor = 1.0 if sess.stems.vocals is not None else 0.8
 
-        # 7a. 降噪
+        # 7a. 降噪 (+ keep_breath 气口保护)
         if _on("denoise"):
             try:
                 audio_in = audio
                 hp_denoise = sess.measurements.get("_hp", {}).get("denoise_strength_override", tmpl["denoise_strength"])
+                hp_keep_breath = sess.measurements.get("_hp", {}).get("keep_breath", True)
+
+                # ★ keep_breath：denoise 前检测气口帧 mask（短窗 RMS + 能量下降沿）
+                breath_mask = None
+                if hp_keep_breath:
+                    breath_mask = self._detect_breath_frames(audio, sr)
+
                 audio = apply_denoise(sess, _s("denoise", hp_denoise) * stem_factor).working["wav"]
+
+                # ★ keep_breath：denoise 后对气口帧反向抬 0.8dB（把被过度降噪的气口/尾音还原）
+                if breath_mask is not None and breath_mask.any():
+                    breath_gain = 10 ** (0.8 / 20.0)   # +0.8dB 线性增益
+                    if audio.ndim == 1:
+                        audio[breath_mask] *= breath_gain
+                    else:
+                        for ch in range(audio.shape[1]):
+                            audio[breath_mask, ch] *= breath_gain
+
                 self._record_step(sess, "denoise", audio_in, audio, "ok")
             except Exception as e:
                 self._record_step(sess, "denoise", None, None, "skipped", str(e))
@@ -506,14 +590,42 @@ class Pipeline:
         audio = sess.working["wav"]
         sr = sess.working["sr"]
 
-        # 8a. 响度标准化
+        # 8a. 响度标准化 (+ dynamic_wide: 容忍内跳过)
         if _on("loudness_normalize"):
             try:
                 audio_in = audio
                 target = _s("loudness_normalize", tmpl["il_target_lufs"])
-                audio, il, lra = loudness_normalize(audio, sr, target_lufs=target)
-                sess.diagnosis.mechanical_signature.lra_lu = lra
-                self._record_step(sess, "loudness_normalize", audio_in, audio, "ok")
+
+                hp_dynamic_wide = sess.measurements.get("_hp", {}).get("dynamic_wide", True)
+                hp_loudness_tol = sess.measurements.get("_hp", {}).get("loudness_tol_lufs", 1.5)
+
+                # ★ dynamic_wide：先测一次 IL，如果已经在容忍范围内就跳过压缩
+                if hp_dynamic_wide:
+                    try:
+                        import pyloudnorm as pyln
+                        meter = pyln.Meter(sr)
+                        measure = audio[:, None] if audio.ndim == 1 else audio
+                        current_il = float(meter.integrated_loudness(measure))
+                        il_dev = abs(current_il - target)
+                        if il_dev <= hp_loudness_tol:
+                            # 已在容忍内，跳过 normalize（保留自然动态）
+                            self._record_step(
+                                sess, "loudness_normalize", audio_in, audio_in, "ok",
+                                f"dynamic_wide: IL={current_il:.1f} 已在 ±{hp_loudness_tol:.1f} LUFS 容忍内，跳过压缩",
+                            )
+                        else:
+                            audio, il, lra = loudness_normalize(audio, sr, target_lufs=target)
+                            sess.diagnosis.mechanical_signature.lra_lu = lra
+                            self._record_step(sess, "loudness_normalize", audio_in, audio, "ok")
+                    except Exception:
+                        audio, il, lra = loudness_normalize(audio, sr, target_lufs=target)
+                        sess.diagnosis.mechanical_signature.lra_lu = lra
+                        self._record_step(sess, "loudness_normalize", audio_in, audio, "ok")
+                else:
+                    # dynamic_wide=False → 电台感优先，硬压到 target
+                    audio, il, lra = loudness_normalize(audio, sr, target_lufs=target)
+                    sess.diagnosis.mechanical_signature.lra_lu = lra
+                    self._record_step(sess, "loudness_normalize", audio_in, audio, "ok")
             except Exception as e:
                 self._record_step(sess, "loudness_normalize", None, None, "skipped", str(e))
         else:
