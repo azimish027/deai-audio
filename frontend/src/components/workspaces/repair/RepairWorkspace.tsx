@@ -135,7 +135,7 @@ function EmptyRepairState({ onNavigate }: { onNavigate: (w: "repair" | "referenc
       <div>
         <div className="text-[15px] font-semibold text-notion-text">从这里开始</div>
         <div className="text-[12px] text-notion-muted mt-1 max-w-sm">
-          拖入或点击选择一段需要修复的音频，右侧面板选模板 → 一键消除机械感、消削波、修瞬态
+          拖入或点击选择一段需要修复的音频，右侧面板选模板 → 一键留白：消机械感 · 消削波 · 修瞬态
         </div>
       </div>
       <div className="flex flex-wrap gap-2 justify-center mt-1">

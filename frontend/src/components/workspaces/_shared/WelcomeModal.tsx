@@ -60,7 +60,7 @@ export function WelcomeModal() {
 
         <div className="flex items-center gap-2 mb-1">
           <Zap className="w-5 h-5 text-notion-accent" />
-          <span className="text-[15px] font-semibold">DeAI Audio</span>
+          <span className="text-[15px] font-semibold">留白</span>
         </div>
         <div className="text-[12px] text-notion-muted mb-5">从一段原始素材，到一个可编辑的音乐工程</div>
 

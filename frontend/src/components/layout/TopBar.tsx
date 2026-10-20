@@ -39,8 +39,8 @@ export function TopBar() {
 
       <div className="flex items-center gap-1.5 sm:gap-2.5 min-w-0">
         <AudioLines className="w-4 h-4 text-notion-accent shrink-0" />
-        <span className="text-[13px] sm:text-[14px] font-semibold tracking-tight shrink-0 hidden sm:inline">DeAI</span>
-        <span className="text-[11px] sm:text-[12px] text-notion-faint shrink-0 hidden md:inline">去AI化</span>
+        <span className="text-[13px] sm:text-[14px] font-semibold tracking-tight shrink-0 hidden sm:inline">留白</span>
+        <span className="text-[11px] sm:text-[12px] text-notion-faint shrink-0 hidden md:inline">留活气</span>
         {!mobile && <span className="w-px h-4 bg-notion-border mx-1" />}
         {!mobile && (
           <input

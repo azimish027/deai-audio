@@ -3,7 +3,7 @@ import { useUIStore } from "../../stores/uiStore";
 import type { WorkspaceKind } from "../../types/project";
 
 const ITEMS: { id: WorkspaceKind; label: string; Icon: typeof Wrench; hint?: string }[] = [
-  { id: "repair",    label: "修复台",   Icon: Wrench,        hint: "一键去 AI 化" },
+  { id: "repair",    label: "修复台",   Icon: Wrench,        hint: "一键留白" },
   { id: "reference", label: "拆解台",   Icon: Disc,          hint: "拆解参考歌"   },
   { id: "compose",   label: "编曲台",   Icon: Music,         hint: "轨道 + 和弦"  },
   { id: "lyric",     label: "词作台",   Icon: PenTool,       hint: "音节对齐"     },

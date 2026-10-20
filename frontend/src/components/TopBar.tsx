@@ -5,7 +5,7 @@ export function TopBar({ backendOk }: { backendOk: boolean }) {
     <header className="h-12 border-b border-notion-border flex items-center px-6 justify-between bg-notion-bg shrink-0">
       <div className="flex items-center gap-2.5">
         <AudioLines className="w-4 h-4 text-notion-accent" />
-        <span className="text-[14px] font-semibold tracking-tight">DeAI Audio</span>
+        <span className="text-[14px] font-semibold tracking-tight whitespace-pre" style={{ letterSpacing: "0.15em" }}>留白</span>
         <span className="text-[12px] text-notion-faint">去 AI 化 · 一键变可听</span>
       </div>
       <div className="flex items-center gap-2 text-[12px]">

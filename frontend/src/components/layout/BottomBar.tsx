@@ -42,7 +42,7 @@ export function BottomBar() {
   // 桌面：Toast 容器 + 后端状态（TopBar 已有）—— 暂放空占位保持高度
   return (
     <footer className="h-6 border-t border-notion-border bg-notion-bg flex items-center justify-between px-4 text-[11px] text-notion-faint shrink-0 z-10">
-      <span>DeAI Audio · 0.1.0</span>
+      <span>留白 · 0.1.0</span>
       <span className="hidden sm:inline">桌面端体验最佳 · 移动端预览版</span>
     </footer>
   );
