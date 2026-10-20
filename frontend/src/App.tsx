@@ -4,7 +4,7 @@
  * - 平板 (768~1023px)：默认折叠 RightPanel；LeftPanel 220px
  * - 移动端 (<768px)：TopBar 瘦身 + LeftPanel/RightPanel 默认抽屉式隐藏 + BottomBar 变 Tab Bar
  */
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { TopBar } from "./components/layout/TopBar";
 import { LeftPanel } from "./components/layout/LeftPanel";
 import { RightPanel } from "./components/layout/RightPanel";
@@ -12,6 +12,7 @@ import { BottomBar } from "./components/layout/BottomBar";
 import { CenterCanvas } from "./components/layout/CenterCanvas";
 import { WelcomeModal } from "./components/workspaces/_shared/WelcomeModal";
 import { OfflineIndicator } from "./components/OfflineIndicator";
+import { SplashScreen } from "./components/SplashScreen";
 import { useEngineStore } from "./stores/engineStore";
 import { useUIStore } from "./stores/uiStore";
 import { useIsMobile, useIsTablet } from "./hooks/useResponsive";
@@ -23,6 +24,7 @@ export default function App() {
   const mobile = useIsMobile();
   const tablet = useIsTablet();
   const setPanel = useUIStore((s) => s.setPanel);
+  const [splashDone, setSplashDone] = useState(false);
 
   // 主题引擎：触发 Zustand persist middleware 初始化 + :root 挂载
   useThemeStore();
@@ -54,6 +56,7 @@ export default function App() {
 
   return (
     <div className="h-full flex flex-col bg-notion-bg text-notion-text overflow-hidden">
+      {!splashDone && <SplashScreen onDone={() => setSplashDone(true)} />}
       <OfflineIndicator />
       <TopBar />
 
