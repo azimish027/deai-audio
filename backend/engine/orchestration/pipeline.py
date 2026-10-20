@@ -258,6 +258,7 @@ class Pipeline:
         params = params or {}
         enabled_dict: dict[str, bool] = params.get("enabled") or {}
         strengths: dict[str, float] = params.get("strengths") or {}
+        human_override: dict = params.get("human_preserve") or {}
 
         def _is_on(step_id: str, default: bool = True) -> bool:
             return enabled_dict.get(step_id, default)
@@ -270,10 +271,29 @@ class Pipeline:
 
         tmpl = TEMPLATES.get(template_id, TEMPLATES["studio_vocal"])
 
+        # ── human_preserve：模板默认 + 用户覆盖 ──
+        hp_default = tmpl.get("human_preserve", {}) or {}
+        hp = {**hp_default, **human_override}   # 用户 params 最后覆盖
+        hp_on = bool(hp.get("enabled", hp_default.get("enabled", True)))
+
         # strength override helper：模板值 × strength_multiplier
         def _s(step_id: str, template_default: float, *, minv: float = 0.0, maxv: float = 999.0) -> float:
             mul = strengths.get(step_id, 1.0)
             return max(minv, min(maxv, template_default * mul))
+
+        # ★ 人味保护：denoise_strength ×0.6（气口/尾音一起被当噪声音掉）
+        #    deverb_wet_retention ×1.5（口腔共鸣是"人"的标记）
+        denoise_strength_hp = tmpl["denoise_strength"]
+        deverb_wet_hp = tmpl["deverb_wet_retention"]
+        pitch_enabled_hp = False   # 默认不修音（反直觉点）
+        pitch_tol_hp = hp.get("pitch_tolerance_cents", hp_default.get("pitch_tolerance_cents", 15))
+        loudness_tol_hp = hp.get("loudness_tolerance_lufs", hp_default.get("loudness_tolerance_lufs", 1.5))
+
+        if hp_on:
+            denoise_strength_hp *= hp.get("denoise_strength_mult", hp_default.get("denoise_strength_mult", 0.6))
+            deverb_wet_hp *= hp.get("deverb_wet_retention_mult", hp_default.get("deverb_wet_retention_mult", 1.5))
+            # 修音只在"偏差 > tolerance"时才触发（故意留微偏差）
+            pitch_enabled_hp = hp.get("pitch_correct", hp_default.get("pitch_correct", True))
 
         sess.measurements = {  # type: ignore[attr-defined]  # 运行时动态字段
             "before": {},
@@ -284,6 +304,17 @@ class Pipeline:
             "template_id": template_id,
             "enabled": enabled_dict,
             "strengths": strengths,
+            "human_preserve": hp,
+        }
+
+        # 把子方法需要的 hp 变量直接挂到 measurements 里（子方法从 sess.measurements 读）
+        sess.measurements["_hp"] = {
+            "on": hp_on,
+            "denoise_strength_override": denoise_strength_hp,
+            "deverb_wet_override": deverb_wet_hp,
+            "pitch_enabled": pitch_enabled_hp,
+            "pitch_tol_cents": pitch_tol_hp,
+            "loudness_tol_lufs": loudness_tol_hp,
         }
 
         # ── 1. 解码（不能关） ──
@@ -393,7 +424,8 @@ class Pipeline:
         if _on("denoise"):
             try:
                 audio_in = audio
-                audio = apply_denoise(sess, _s("denoise", tmpl["denoise_strength"]) * stem_factor).working["wav"]
+                hp_denoise = sess.measurements.get("_hp", {}).get("denoise_strength_override", tmpl["denoise_strength"])
+                audio = apply_denoise(sess, _s("denoise", hp_denoise) * stem_factor).working["wav"]
                 self._record_step(sess, "denoise", audio_in, audio, "ok")
             except Exception as e:
                 self._record_step(sess, "denoise", None, None, "skipped", str(e))
@@ -405,7 +437,8 @@ class Pipeline:
             try:
                 audio_in = audio
                 # strength=1.0 → 模板原值；strength=0 → wet_retention 降 20%
-                wet = tmpl["deverb_wet_retention"] * (1.0 - 0.2 * (1.0 - strengths.get("deverb", 1.0)))
+                hp_deverb = sess.measurements.get("_hp", {}).get("deverb_wet_override", tmpl["deverb_wet_retention"])
+                wet = hp_deverb * (1.0 - 0.2 * (1.0 - strengths.get("deverb", 1.0)))
                 audio = apply_deverb(audio, sr, wet_retention=wet)
                 self._record_step(sess, "deverb", audio_in, audio, "ok")
             except Exception as e:
@@ -443,7 +476,8 @@ class Pipeline:
 
         # 7e. 音高修正（默认关闭） + 7f. 微瑕疵注入（不进 steps）
         try:
-            _ = pitch_correct_via_tdpsola(audio, sr, f0_shift_cents=0.0, enable=False)
+            hp_pitch_enabled = sess.measurements.get("_hp", {}).get("pitch_enabled", False)
+            _ = pitch_correct_via_tdpsola(audio, sr, f0_shift_cents=0.0, enable=hp_pitch_enabled)
         except Exception:
             pass
         try:

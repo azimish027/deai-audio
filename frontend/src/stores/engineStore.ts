@@ -7,7 +7,7 @@ import { produce } from "immer";
 import { v4 as uuid } from "uuid";
 import type { RepairSession } from "../types/project";
 import type { ReferenceAnalysisResult } from "../api/engine";
-import type { StepControls } from "../components/metrics/StepCards";
+import type { StepControls, HumanPreserveControls } from "../utils/repairControls";
 
 export type RepairStatus = "idle" | "uploading" | "processing" | "done" | "error";
 
@@ -17,7 +17,7 @@ export interface RepairSessionUI extends RepairSession {
   error?: string;
   status: RepairStatus;
   progress_text?: string;
-  run_controls?: StepControls;    // 每次处理完存最后一次的 enabled+strengths，下次重跑 restore
+  run_controls?: StepControls & { human?: HumanPreserveControls };
 }
 
 interface EngineStore {

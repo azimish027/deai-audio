@@ -54,9 +54,24 @@ PIPELINE_STATES = [
     "SEGMENTED", "PROCESSING", "NORMALIZED", "EXPORTED",
 ]
 
-# ── 6 模板参数表（直接来自文档） ────────────────────────────────────
+# ── 模板参数表（9 步 DSP） ────────────────────────────────────────
+# 每个模板的 human_preserve 字段覆盖人味保护子开关默认值。
+# 前端 StepCards 人味子面板 → params.human_preserve → 这里读取 / 覆盖。
+
+HUMAN_PROFILE_DEFAULTS = {
+    "enabled": True,                 # 人味保护总开关（默认开）
+    "pitch_correct": True,           # 修音（允许±cents 内偏差）
+    "pitch_tolerance_cents": 15,     # ±15 cents 不修音（反直觉点：修到 100% 准人味死）
+    "keep_breath": True,             # 气口保留（降噪时不衰减吸气段）
+    "keep_slur": True,               # 滑音保留（pitch 检测不量化滑音段）
+    "dynamic_wide": True,            # 动态范围放宽（不过度压缩）
+    "loudness_tolerance_lufs": 1.5,  # 响度 ±1.5 LUFS 容忍度（电台感来自精确到 ±0.1）
+    "denoise_strength_mult": 0.6,    # 降噪强度 ×0.6（气口一起被当噪声音掉）
+    "deverb_wet_retention_mult": 1.5,# 混响保留 ×1.5（口腔共鸣是"人"的标记）
+}
+
 TEMPLATES = {
-    "studio_vocal": {    # 录音棚人声
+    "studio_vocal": {    # 录音棚人声 → 人味全开，气口滑音保留
         "denoise_strength": 0.6,
         "deverb_wet_retention": 0.15,
         "transient_target_db": 8.0,
@@ -66,8 +81,13 @@ TEMPLATES = {
         "deesser_level": "light",
         "segment_lra_target": 5.0,
         "il_target_lufs": IL_TARGET_SPEECH,
+        "human_preserve": {**HUMAN_PROFILE_DEFAULTS,
+            "pitch_tolerance_cents": 15,
+            "keep_breath": True, "keep_slur": True,
+            "loudness_tolerance_lufs": 1.5,
+        },
     },
-    "live_band": {       # 现场乐队感
+    "live_band": {       # 现场乐队感 → 人味全开，动态宽
         "denoise_strength": 0.4,
         "deverb_wet_retention": 0.35,
         "transient_target_db": 12.0,
@@ -77,8 +97,13 @@ TEMPLATES = {
         "deesser_level": "off",
         "segment_lra_target": 8.0,
         "il_target_lufs": IL_TARGET_SPEECH,
+        "human_preserve": {**HUMAN_PROFILE_DEFAULTS,
+            "pitch_tolerance_cents": 20,
+            "keep_breath": False,  # 现场呼吸混响里淹没无所谓
+            "loudness_tolerance_lufs": 2.5,
+        },
     },
-    "film_voiceover": {  # 电影旁白
+    "film_voiceover": {  # 电影旁白 → 人味适度，稳定优先
         "denoise_strength": 0.5,
         "deverb_wet_retention": 0.20,
         "transient_target_db": 7.0,
@@ -88,8 +113,13 @@ TEMPLATES = {
         "deesser_level": "medium",
         "segment_lra_target": 3.0,
         "il_target_lufs": IL_TARGET_SPEECH,
+        "human_preserve": {**HUMAN_PROFILE_DEFAULTS,
+            "pitch_tolerance_cents": 10,  # 旁白要准
+            "keep_slur": False,          # 旁白不要滑音
+            "loudness_tolerance_lufs": 0.8,  # 稳定
+        },
     },
-    "bedroom_demo": {    # 卧室 Demo
+    "bedroom_demo": {    # 卧室 Demo → 人味最松，允许不准
         "denoise_strength": 0.2,
         "deverb_wet_retention": 0.45,
         "transient_target_db": 9.0,
@@ -99,8 +129,15 @@ TEMPLATES = {
         "deesser_level": "light",
         "segment_lra_target": 6.0,
         "il_target_lufs": IL_TARGET_SPEECH,
+        "human_preserve": {**HUMAN_PROFILE_DEFAULTS,
+            "pitch_tolerance_cents": 25,
+            "keep_breath": True, "keep_slur": True,
+            "loudness_tolerance_lufs": 2.0,
+            "denoise_strength_mult": 0.4,  # 卧室本来就脏，降噪要轻
+            "deverb_wet_retention_mult": 2.0,
+        },
     },
-    "podcast_dialogue": {  # 播客对话
+    "podcast_dialogue": {  # 播客对话 → 人味全开（对话最重要的是"像人"）
         "denoise_strength": 0.7,
         "deverb_wet_retention": 0.15,
         "transient_target_db": 7.0,
@@ -110,8 +147,14 @@ TEMPLATES = {
         "deesser_level": "medium",
         "segment_lra_target": 4.0,
         "il_target_lufs": IL_TARGET_SPEECH,
+        "human_preserve": {**HUMAN_PROFILE_DEFAULTS,
+            "pitch_tolerance_cents": 15,
+            "keep_breath": True,
+            "loudness_tolerance_lufs": 1.5,
+            "denoise_strength_mult": 0.5,  # 播客降噪不能太狠
+        },
     },
-    "short_video_voiceover": {  # 短视频口播
+    "short_video_voiceover": {  # 短视频口播 → 电台感优先，人味关大部分
         "denoise_strength": 0.65,
         "deverb_wet_retention": 0.10,
         "transient_target_db": 6.0,
@@ -121,6 +164,17 @@ TEMPLATES = {
         "deesser_level": "medium",
         "segment_lra_target": 3.0,
         "il_target_lufs": IL_TARGET_SHORT_VIDEO,
+        "human_preserve": {**HUMAN_PROFILE_DEFAULTS,
+            "enabled": False,              # 短视频不要人味保护，电台感
+            "pitch_correct": True,
+            "pitch_tolerance_cents": 5,    # 要准
+            "keep_breath": False,
+            "keep_slur": False,
+            "dynamic_wide": False,
+            "loudness_tolerance_lufs": 0.5,  # 响度精确到 ±0.5
+            "denoise_strength_mult": 1.0,
+            "deverb_wet_retention_mult": 1.0,
+        },
     },
 }
 
