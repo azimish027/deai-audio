@@ -7,15 +7,17 @@ import { produce } from "immer";
 import { v4 as uuid } from "uuid";
 import type { RepairSession } from "../types/project";
 import type { ReferenceAnalysisResult } from "../api/engine";
+import type { StepControls } from "../components/metrics/StepCards";
 
 export type RepairStatus = "idle" | "uploading" | "processing" | "done" | "error";
 
 export interface RepairSessionUI extends RepairSession {
-  audio_url: string;            // 原音频 ObjectURL
-  processed_url?: string;      // 处理后 WAV blob_url（WaveSurfer A/B 对比用）
+  audio_url: string;
+  processed_url?: string;
   error?: string;
   status: RepairStatus;
   progress_text?: string;
+  run_controls?: StepControls;    // 每次处理完存最后一次的 enabled+strengths，下次重跑 restore
 }
 
 interface EngineStore {
@@ -43,6 +45,7 @@ interface EngineStore {
   setRepairStatus: (session_id: string, status: RepairStatus, progressText?: string) => void;
   setRepairResult: (session_id: string, result: Omit<RepairSession, "session_id" | "created_at">) => void;
   setRepairError: (session_id: string, error: string) => void;
+  setRunControls: (session_id: string, controls: StepControls) => void;
   selectSession: (session_id: string | null) => void;
   removeSession: (session_id: string) => void;
 
@@ -105,6 +108,10 @@ export const useEngineStore = create<EngineStore>((set) => ({
   setRepairError: (session_id, error) => set(produce((s: EngineStore) => {
     const sess = s.repair_sessions.find((x) => x.session_id === session_id);
     if (sess) { sess.status = "error"; sess.error = error; }
+  })),
+  setRunControls: (session_id, controls) => set(produce((s: EngineStore) => {
+    const sess = s.repair_sessions.find((x) => x.session_id === session_id);
+    if (sess) sess.run_controls = controls;
   })),
   selectSession: (id) => set({ selected_session_id: id }),
   removeSession: (session_id) => set(produce((s: EngineStore) => {

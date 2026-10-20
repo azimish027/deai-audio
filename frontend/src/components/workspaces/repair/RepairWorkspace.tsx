@@ -5,15 +5,21 @@ import { SegmentList } from "../../SegmentList";
 import { ExportBar } from "../../ExportBar";
 import { GaugeDashboard } from "../../metrics/GaugeDashboard";
 import { StepCards } from "../../metrics/StepCards";
+import { MultiCandidateCompare } from "../../metrics/MultiCandidateCompare";
 import { useEngineStore } from "../../../stores/engineStore";
 import { useUIStore } from "../../../stores/uiStore";
 import { NextStepCard } from "../_shared/NextStepCard";
+import { makeDefaultControls } from "../../../utils/repairControls";
 
 /** 修复台 Center：空状态 → 处理中 → 完成。 */
 export function RepairWorkspace() {
   const selected_id = useEngineStore((s) => s.selected_session_id);
   const sess = useEngineStore((s) => s.repair_sessions.find((x) => x.session_id === selected_id));
+  const setRunControls = useEngineStore((s) => s.setRunControls);
   const setWs = useUIStore((s) => s.setWorkspace);
+
+  const controls = sess?.run_controls ?? makeDefaultControls();
+  const setControls = (next: typeof controls) => sess && setRunControls(sess.session_id, next);
 
   const [stepsOpen, setStepsOpen] = useState(true);
 
@@ -53,15 +59,18 @@ export function RepairWorkspace() {
         disabled={!isDone}
       />
 
-      {/* 处理后：仪表盘 + 步骤卡（Center 主区，一眼可见） */}
+      {/* 处理后：仪表盘 + 步骤卡 + 多候选并排对比 */}
       {isDone && measurements && (
         <div className="space-y-3">
+          {/* 多候选并排（如果 versionStore 有 ≥2 个 after-snapshot） */}
+          <MultiCandidateCompare sessionId={sess.session_id} />
+
           <GaugeDashboard
             measurements={measurements}
             diagnosis={sess.diagnosis as any}
           />
 
-          {/* 步骤卡（可折叠） */}
+          {/* 步骤卡（受控组件：Center 与右侧面板共享同一个 controls） */}
           <div className="notion-card p-3">
             <button
               className="w-full flex items-center justify-between text-[12px] font-medium text-notion-muted hover:text-notion-text-2"
@@ -72,7 +81,7 @@ export function RepairWorkspace() {
             </button>
             {stepsOpen && (
               <div className="mt-3">
-                <StepCards measurements={measurements} />
+                <StepCards measurements={measurements} controls={controls} onChange={setControls} />
               </div>
             )}
           </div>

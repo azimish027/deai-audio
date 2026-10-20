@@ -1,12 +1,13 @@
 """FastAPI HTTP 桥接层：Electron 前端通过 HTTP 调用后端。"""
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import traceback
 from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -27,11 +28,6 @@ app.add_middleware(
 _pipelines: dict[str, Pipeline] = {}
 
 
-class ProcessRequest(BaseModel):
-    template_id: str = "studio_vocal"
-    keep_audio: bool = False
-
-
 class SessionInfo(BaseModel):
     session_id: str
     state: str
@@ -39,13 +35,31 @@ class SessionInfo(BaseModel):
     diagnosis: dict
     segments: list
     exports: dict
-    measurements: dict = {}   # 新增：before/after/steps/lufs_target/true_peak_limit
+    measurements: dict = {}
+    params: dict = {}
 
 
 @app.post("/process", response_model=SessionInfo)
-async def process_audio(file: UploadFile = File(...),
-                        template_id: str = "studio_vocal") -> SessionInfo:
-    """上传音频文件，跑完整链，返回 SessionInfo。"""
+async def process_audio(
+    file: UploadFile = File(...),
+    template_id: str = Form("studio_vocal"),
+    enabled_json: str = Form(""),
+    strengths_json: str = Form(""),
+) -> SessionInfo:
+    """上传音频跑完整链。
+
+    enabled_json / strengths_json 可选：
+        enabled_json   = '{"denoise": false}'
+        strengths_json = '{"deverb": 1.3}'
+    """
+    params: dict = {}
+    if enabled_json:
+        try: params["enabled"] = json.loads(enabled_json)
+        except Exception: pass
+    if strengths_json:
+        try: params["strengths"] = json.loads(strengths_json)
+        except Exception: pass
+
     tmp_dir = tempfile.mkdtemp(prefix="deai_upload_")
     in_path = os.path.join(tmp_dir, file.filename or "input.wav")
     with open(in_path, "wb") as f:
@@ -53,7 +67,7 @@ async def process_audio(file: UploadFile = File(...),
 
     try:
         p = Pipeline(tmp_dir=tmp_dir)
-        sess = p.run(in_path, template_id=template_id)
+        sess = p.run(in_path, template_id=template_id, params=params)
         _pipelines[sess.session_id] = p
     except Exception as e:
         traceback.print_exc()
@@ -75,6 +89,7 @@ async def process_audio(file: UploadFile = File(...),
         segments=sess.to_dict()["segments"],
         exports={k: v for k, v in sess.exports.__dict__.items() if v},
         measurements=getattr(sess, "measurements", {}),
+        params=getattr(sess, "params", {}),
     )
 
 

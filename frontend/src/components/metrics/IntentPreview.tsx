@@ -1,15 +1,12 @@
 /**
- * IntentPreview —— "一键变可听" 前弹的意图预演卡
+ * IntentPreview —— "一键变可听" 前弹的意图预演卡（完整版）
  *
- * 点击 RepairRightPanel 的"一键变可听"按钮 → 先弹这张卡：
- *   "我理解这是一段人声音频，你选的是【录音棚人声】模板，
- *    准备跑 9 步处理链（DC→declip→诊断→分离→分段→降噪→去混响→瞬态→响度），
- *    目标 LUFS=-16.0，True Peak ≤-1.0 dBTP。确认执行？"
- *
- * 用户点"确认"才真的调后端 /api/process，"取消"则关弹窗。
+ * 可选接受 controls（StepControls），显示用户调的开关和强度摘要。
  */
-import { Sparkles, X, Check, AlertCircle, Wrench } from 'lucide-react';
+import { Sparkles, X, Check, AlertCircle, Wrench, Gauge } from 'lucide-react';
 import { TEMPLATE_NAMES_ZH } from '../../config/templates';
+import type { StepControls } from './StepCards';
+import { summarizeControls } from '../../utils/repairControls';
 
 interface Props {
   open: boolean;
@@ -17,30 +14,20 @@ interface Props {
   onConfirm: () => void;
   templateId: string;
   fileName: string;
+  controls?: StepControls;   // 可选：用户在 StepCards 上调的开关+强度
+  multiRunCount?: number;    // AI 多候选时显示"将跑 N 个模板"
 }
 
-export function IntentPreview({ open, onClose, onConfirm, templateId, fileName }: Props) {
+export function IntentPreview({ open, onClose, onConfirm, templateId, fileName, controls, multiRunCount }: Props) {
   if (!open) return null;
 
   const templateZH = TEMPLATE_NAMES_ZH[templateId] ?? templateId;
-
-  // 模板对应的参数摘要（硬编码，和 constants.py 对齐）
   const targetLufs = templateId === 'short_video_voiceover' ? -14.0 : -16.0;
-  const pipelineSteps = [
-    'DC Offset 去除',
-    '削波稀疏重建',
-    'Demucs 源分离',
-    'DeepFilterNet 降噪',
-    '去混响',
-    '瞬态恢复',
-    '去齿音',
-    '响度标准化 (EBU R128)',
-    'True Peak 限幅',
-  ];
+  const controlSummary = controls ? summarizeControls(controls) : null;
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 backdrop-blur-sm">
-      <div className="w-[380px] max-w-[92vw] notion-card bg-notion-bg shadow-xl rounded-lg overflow-hidden">
+      <div className="w-[400px] max-w-[94vw] notion-card bg-notion-bg shadow-xl rounded-lg overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-notion-border bg-notion-hover/50">
           <div className="flex items-center gap-1.5">
@@ -53,15 +40,15 @@ export function IntentPreview({ open, onClose, onConfirm, templateId, fileName }
         </div>
 
         {/* Body */}
-        <div className="p-4 space-y-3">
+        <div className="p-4 space-y-3 max-h-[70vh] overflow-auto">
           {/* 理解 */}
           <div>
             <div className="text-[11px] text-notion-faint mb-1">我理解你的输入</div>
-            <div className="text-[12px] text-notion-text font-medium">
-              {fileName}
-            </div>
+            <div className="text-[12px] text-notion-text font-medium break-all">{fileName}</div>
             <div className="text-[11px] text-notion-muted">
-              使用模板：<span className="text-notion-accent font-medium">{templateZH}</span>
+              {multiRunCount
+                ? <>AI 将自动跑 <span className="text-notion-accent font-medium">{multiRunCount}</span> 个模板并排对比</>
+                : <>使用模板：<span className="text-notion-accent font-medium">{templateZH}</span></>}
             </div>
           </div>
 
@@ -71,17 +58,33 @@ export function IntentPreview({ open, onClose, onConfirm, templateId, fileName }
               <Wrench className="w-3 h-3" />
               准备跑以下处理链
             </div>
-            <div className="notion-card p-2 space-y-0.5 bg-notion-panel/50">
-              {pipelineSteps.map((s, i) => (
-                <div key={i} className="flex items-center gap-1.5 text-[11px] text-notion-muted">
-                  <span className="w-4 h-4 rounded-full bg-notion-hover text-[9px] flex items-center justify-center text-notion-faint">
-                    {i + 1}
-                  </span>
-                  {s}
-                </div>
-              ))}
+            <div className="notion-card p-2 space-y-0.5 bg-notion-panel/50 max-h-[180px] overflow-auto">
+              <div className="flex items-center gap-1.5 text-[11px] text-notion-muted"><span className="w-4">#</span>DC Offset → 削波修复 → 诊断 → 分离 → 降噪 → 去混响 → 瞬态恢复 → 去齿音 → 响度标准化 → True Peak 限幅</div>
             </div>
           </div>
+
+          {/* 用户自定义 controls 摘要 */}
+          {controlSummary && (
+            <div>
+              <div className="text-[11px] text-notion-faint mb-1 flex items-center gap-1">
+                <Gauge className="w-3 h-3" />
+                你的自定义
+              </div>
+              <div className="text-[11px] bg-notion-panel/50 rounded px-2 py-1.5 text-notion-text-2 leading-relaxed">
+                {controlSummary.summary}
+                {controlSummary.off.length > 0 && (
+                  <div className="text-notion-muted text-[10px] mt-0.5">
+                    关闭：{controlSummary.off.join('、')}
+                  </div>
+                )}
+                {controlSummary.modified.length > 0 && (
+                  <div className="text-notion-muted text-[10px]">
+                    强度调整：{controlSummary.modified.map((m) => `${m.name} ${m.value.toFixed(1)}x`).join('；')}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* 目标指标 */}
           <div>
@@ -101,9 +104,7 @@ export function IntentPreview({ open, onClose, onConfirm, templateId, fileName }
           {/* 免责声明 */}
           <div className="flex gap-1.5 items-start text-[10.5px] text-notion-faint bg-notion-panel/50 rounded px-2 py-1.5">
             <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" />
-            <span>
-              这是音频信号处理，不是魔法。跑完后右侧仪表盘会告诉你每一步实际动了多少——不满意随时切模板重跑。
-            </span>
+            <span>这是音频信号处理，不是魔法。跑完后仪表盘会告诉你每步实际动了多少——不满意随时调开关/强度重跑。</span>
           </div>
         </div>
 

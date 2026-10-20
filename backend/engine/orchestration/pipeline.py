@@ -242,23 +242,51 @@ class Pipeline:
         })
 
     # ───────── 主流程 ─────────
-    def run(self, src_path: str, template_id: str = "studio_vocal") -> Session:
+    def run(
+        self,
+        src_path: str,
+        template_id: str = "studio_vocal",
+        params: Optional[dict] = None,
+    ) -> Session:
+        """
+        params 可空，结构：
+            {
+              "enabled":    {step_id: bool, ...},   # False → 该步跳过，status="skipped"
+              "strengths":  {step_id: float, ...}, # 覆盖模板默认值；1.0 = 原值
+            }
+        """
+        params = params or {}
+        enabled_dict: dict[str, bool] = params.get("enabled") or {}
+        strengths: dict[str, float] = params.get("strengths") or {}
+
+        def _is_on(step_id: str, default: bool = True) -> bool:
+            return enabled_dict.get(step_id, default)
+
         sess = Session()
         sess.source.path = src_path
         sess.template_id = template_id
         sess.tmp_dir = self._tmp_dir
+        sess.params = params   # type: ignore[attr-defined]  # 回显到前端
+
+        tmpl = TEMPLATES.get(template_id, TEMPLATES["studio_vocal"])
+
+        # strength override helper：模板值 × strength_multiplier
+        def _s(step_id: str, template_default: float, *, minv: float = 0.0, maxv: float = 999.0) -> float:
+            mul = strengths.get(step_id, 1.0)
+            return max(minv, min(maxv, template_default * mul))
+
         sess.measurements = {  # type: ignore[attr-defined]  # 运行时动态字段
             "before": {},
             "after": {},
             "steps": [],
-            "lufs_target": TEMPLATES.get(template_id, {}).get("il_target_lufs", -16.0),
+            "lufs_target": tmpl.get("il_target_lufs", -16.0),
             "true_peak_limit_dbtp": TRUE_PEAK_LIMIT_WAV_DBTP,
             "template_id": template_id,
+            "enabled": enabled_dict,
+            "strengths": strengths,
         }
 
-        tmpl = TEMPLATES.get(template_id, TEMPLATES["studio_vocal"])
-
-        # ── 1. 解码 ──
+        # ── 1. 解码（不能关） ──
         sess.state = PipelineState.UPLOADED
         try:
             decode_to_wav48(sess)
@@ -270,24 +298,30 @@ class Pipeline:
         sess.measurements["before"] = _measure_audio(sess.working["wav"], sess.working["sr"])
 
         # ── 2. DC 去除 ──
-        try:
-            audio_in = sess.working["wav"]
-            audio_out = remove_dc_offset(audio_in)
-            sess.working["wav"] = audio_out
-            self._record_step(sess, "dc_offset", audio_in, audio_out, "ok")
-        except Exception as e:
-            self._record_step(sess, "dc_offset", None, None, "skipped", str(e))
+        if _is_on("dc_offset"):
+            try:
+                audio_in = sess.working["wav"]
+                audio_out = remove_dc_offset(audio_in)
+                sess.working["wav"] = audio_out
+                self._record_step(sess, "dc_offset", audio_in, audio_out, "ok")
+            except Exception as e:
+                self._record_step(sess, "dc_offset", None, None, "skipped", str(e))
+        else:
+            self._record_step(sess, "dc_offset", None, None, "skipped", "用户关闭")
 
         # ── 3. 削波修复 ──
-        try:
-            audio_in = sess.working["wav"]
-            audio_out = declip_sparse(audio_in, sess.working["sr"])
-            sess.working["wav"] = audio_out
-            self._record_step(sess, "declip", audio_in, audio_out, "ok")
-        except Exception as e:
-            self._record_step(sess, "declip", None, None, "skipped", str(e))
+        if _is_on("declip"):
+            try:
+                audio_in = sess.working["wav"]
+                audio_out = declip_sparse(audio_in, sess.working["sr"])
+                sess.working["wav"] = audio_out
+                self._record_step(sess, "declip", audio_in, audio_out, "ok")
+            except Exception as e:
+                self._record_step(sess, "declip", None, None, "skipped", str(e))
+        else:
+            self._record_step(sess, "declip", None, None, "skipped", "用户关闭")
 
-        # ── 4. 诊断（不处理音频，只测量） ──
+        # ── 4. 诊断（不处理音频，只测量，不接受开关） ──
         try:
             sess.diagnosis = build_diagnosis_report(sess)
         except Exception:
@@ -295,35 +329,40 @@ class Pipeline:
         sess.state = PipelineState.DIAGNOSED
 
         # ── 5. 源分离 ──
-        try:
-            audio_in = sess.working["wav"]
-            sess = separate_session(sess)
-            audio_out = sess.working["wav"]
-            self._record_step(sess, "separation", audio_in, audio_out, "ok")
-        except Exception as e:
+        if _is_on("separation"):
+            try:
+                audio_in = sess.working["wav"]
+                sess = separate_session(sess)
+                audio_out = sess.working["wav"]
+                self._record_step(sess, "separation", audio_in, audio_out, "ok")
+            except Exception as e:
+                sess.stems = type(sess.stems)()
+                self._record_step(sess, "separation", None, None, "skipped", str(e))
+        else:
+            # 用户关了分离，清空 stems（后续 stem_factor=0.8 走全混音处理）
             sess.stems = type(sess.stems)()
-            self._record_step(sess, "separation", None, None, "skipped", str(e))
+            self._record_step(sess, "separation", None, None, "skipped", "用户关闭")
         sess.state = PipelineState.SEPARATED
 
-        # ── 6. 分段 ──
+        # ── 6. 分段（不关） ──
         try:
             sess = segment_session(sess)
         except Exception:
             sess.segments = [SceneSegment(0.0, sess.source.duration_s, SceneLabel.MONOLOGUE, 0.5)]
         sess.state = PipelineState.SEGMENTED
 
-        # ── 7. 模板 DSP 链 ──
-        sess = self._apply_template_chain(sess, tmpl)
+        # ── 7. 模板 DSP 链（接受 enabled + strengths） ──
+        sess = self._apply_template_chain(sess, tmpl, enabled_dict, strengths)
         sess.state = PipelineState.PROCESSING
 
-        # ── 8. 标准化 ──
-        sess = self._apply_normalize(sess, tmpl)
+        # ── 8. 标准化（接受 enabled + strengths） ──
+        sess = self._apply_normalize(sess, tmpl, enabled_dict, strengths)
         sess.state = PipelineState.NORMALIZED
 
         # 终态 after 快照
         sess.measurements["after"] = _measure_audio(sess.working["wav"], sess.working["sr"])
 
-        # ── 9. 导出 ──
+        # ── 9. 导出（不关） ──
         out_dir = os.path.join(self._tmp_dir, "exports")
         try:
             export_all(sess, out_dir)
@@ -333,86 +372,129 @@ class Pipeline:
 
         return sess
 
-    def _apply_template_chain(self, sess: Session, tmpl: dict) -> Session:
+    def _apply_template_chain(
+        self,
+        sess: Session,
+        tmpl: dict,
+        enabled: dict[str, bool],
+        strengths: dict[str, float],
+    ) -> Session:
+        def _on(step_id: str) -> bool:
+            return enabled.get(step_id, True)
+        def _s(step_id: str, default: float, *, lo: float = 0.0, hi: float = 999.0) -> float:
+            mul = strengths.get(step_id, 1.0)
+            return max(lo, min(hi, default * mul))
+
         audio = sess.working["wav"]
         sr = sess.working["sr"]
         stem_factor = 1.0 if sess.stems.vocals is not None else 0.8
 
         # 7a. 降噪
-        try:
-            audio_in = audio
-            audio = apply_denoise(sess, tmpl["denoise_strength"] * stem_factor).working["wav"]
-            self._record_step(sess, "denoise", audio_in, audio, "ok")
-        except Exception as e:
-            self._record_step(sess, "denoise", None, None, "skipped", str(e))
+        if _on("denoise"):
+            try:
+                audio_in = audio
+                audio = apply_denoise(sess, _s("denoise", tmpl["denoise_strength"]) * stem_factor).working["wav"]
+                self._record_step(sess, "denoise", audio_in, audio, "ok")
+            except Exception as e:
+                self._record_step(sess, "denoise", None, None, "skipped", str(e))
+        else:
+            self._record_step(sess, "denoise", None, None, "skipped", "用户关闭")
 
-        # 7b. 去混响
-        try:
-            audio_in = audio
-            audio = apply_deverb(audio, sr, wet_retention=tmpl["deverb_wet_retention"])
-            self._record_step(sess, "deverb", audio_in, audio, "ok")
-        except Exception as e:
-            self._record_step(sess, "deverb", None, None, "skipped", str(e))
+        # 7b. 去混响（strength 越小越激进 → wet_retention 越小）
+        if _on("deverb"):
+            try:
+                audio_in = audio
+                # strength=1.0 → 模板原值；strength=0 → wet_retention 降 20%
+                wet = tmpl["deverb_wet_retention"] * (1.0 - 0.2 * (1.0 - strengths.get("deverb", 1.0)))
+                audio = apply_deverb(audio, sr, wet_retention=wet)
+                self._record_step(sess, "deverb", audio_in, audio, "ok")
+            except Exception as e:
+                self._record_step(sess, "deverb", None, None, "skipped", str(e))
+        else:
+            self._record_step(sess, "deverb", None, None, "skipped", "用户关闭")
 
         # 7c. 瞬态恢复
-        try:
-            audio_in = audio
-            audio = transient_restore(
-                audio, sr,
-                target_transient_db=tmpl["transient_target_db"],
-                max_restore_db=tmpl["transient_max_restore_db"],
-            )
-            self._record_step(sess, "transient_restore", audio_in, audio, "ok")
-        except Exception as e:
-            self._record_step(sess, "transient_restore", None, None, "skipped", str(e))
+        if _on("transient_restore"):
+            try:
+                audio_in = audio
+                audio = transient_restore(
+                    audio, sr,
+                    target_transient_db=tmpl["transient_target_db"],
+                    max_restore_db=_s("transient_restore", tmpl["transient_max_restore_db"]),
+                )
+                self._record_step(sess, "transient_restore", audio_in, audio, "ok")
+            except Exception as e:
+                self._record_step(sess, "transient_restore", None, None, "skipped", str(e))
+        else:
+            self._record_step(sess, "transient_restore", None, None, "skipped", "用户关闭")
 
         # 7d. 去齿音
-        try:
-            audio_in = audio
-            audio = deesser(audio, sr, level=tmpl["deesser_level"])
-            self._record_step(sess, "deesser", audio_in, audio, "ok")
-        except Exception as e:
-            self._record_step(sess, "deesser", None, None, "skipped", str(e))
+        if _on("deesser"):
+            try:
+                audio_in = audio
+                mul = strengths.get("deesser", 1.0)
+                level = "medium" if mul > 0.7 else "light" if mul > 0.3 else "off"
+                audio = deesser(audio, sr, level=level)
+                self._record_step(sess, "deesser", audio_in, audio, "ok")
+            except Exception as e:
+                self._record_step(sess, "deesser", None, None, "skipped", str(e))
+        else:
+            self._record_step(sess, "deesser", None, None, "skipped", "用户关闭")
 
-        # 7e. 音高修正（默认关闭，record 但音频不变）
+        # 7e. 音高修正（默认关闭） + 7f. 微瑕疵注入（不进 steps）
         try:
             _ = pitch_correct_via_tdpsola(audio, sr, f0_shift_cents=0.0, enable=False)
         except Exception:
             pass
-
-        # 7f. 微瑕疵注入（不记 step —— 是"增真"不处理音频质量指标）
         try:
             scene_label = sess.segments[0].scene_label.value if sess.segments else "monologue"
-            audio = inject_micro_imperfections(
-                audio, sr, scene_label=scene_label,
-                do_pitch=True, do_volume=True, do_time=True,
-            )
+            audio = inject_micro_imperfections(audio, sr, scene_label=scene_label,
+                                               do_pitch=True, do_volume=True, do_time=True)
         except Exception:
             pass
 
         sess.working["wav"] = audio
         return sess
 
-    def _apply_normalize(self, sess: Session, tmpl: dict) -> Session:
+    def _apply_normalize(
+        self,
+        sess: Session,
+        tmpl: dict,
+        enabled: dict[str, bool],
+        strengths: dict[str, float],
+    ) -> Session:
+        def _on(step_id: str) -> bool:
+            return enabled.get(step_id, True)
+        def _s(step_id: str, default: float) -> float:
+            mul = strengths.get(step_id, 1.0)
+            return default + (mul - 1.0) * 1.0   # 每 ±0.5 strength → ±1 LUFS 偏移
+
         audio = sess.working["wav"]
         sr = sess.working["sr"]
 
         # 8a. 响度标准化
-        try:
-            audio_in = audio
-            audio, il, lra = loudness_normalize(audio, sr, target_lufs=tmpl["il_target_lufs"])
-            sess.diagnosis.mechanical_signature.lra_lu = lra
-            self._record_step(sess, "loudness_normalize", audio_in, audio, "ok")
-        except Exception as e:
-            self._record_step(sess, "loudness_normalize", None, None, "skipped", str(e))
+        if _on("loudness_normalize"):
+            try:
+                audio_in = audio
+                target = _s("loudness_normalize", tmpl["il_target_lufs"])
+                audio, il, lra = loudness_normalize(audio, sr, target_lufs=target)
+                sess.diagnosis.mechanical_signature.lra_lu = lra
+                self._record_step(sess, "loudness_normalize", audio_in, audio, "ok")
+            except Exception as e:
+                self._record_step(sess, "loudness_normalize", None, None, "skipped", str(e))
+        else:
+            self._record_step(sess, "loudness_normalize", None, None, "skipped", "用户关闭")
 
         # 8b. True Peak 限制
-        try:
-            audio_in = audio
-            audio = truepeak_limit(audio, sr, limit_dbfs=TRUE_PEAK_LIMIT_WAV_DBTP)
-            self._record_step(sess, "true_peak_limit", audio_in, audio, "ok")
-        except Exception as e:
-            self._record_step(sess, "true_peak_limit", None, None, "skipped", str(e))
+        if _on("true_peak_limit"):
+            try:
+                audio_in = audio
+                audio = truepeak_limit(audio, sr, limit_dbfs=TRUE_PEAK_LIMIT_WAV_DBTP)
+                self._record_step(sess, "true_peak_limit", audio_in, audio, "ok")
+            except Exception as e:
+                self._record_step(sess, "true_peak_limit", None, None, "skipped", str(e))
+        else:
+            self._record_step(sess, "true_peak_limit", None, None, "skipped", "用户关闭")
 
         sess.working["wav"] = audio
         return sess

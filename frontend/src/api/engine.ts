@@ -72,17 +72,33 @@ export async function healthCheck(): Promise<boolean> {
   } catch { return false; }
 }
 
-/** createSession —— 上传音频创建修复会话（后端还没有这个端点，先占位，走 /process 合成返回）。 */
-export async function createSession(file: File, templateId: string = "studio_vocal"): Promise<SessionResult> {
+/** 前端控制 pipeline 每步的参数 */
+export interface RepairRunParams {
+  enabled?: Record<string, boolean>;
+  strengths?: Record<string, number>;
+}
+
+/** createSession —— 上传音频跑修复链路（后端 /process）。 */
+export async function createSession(
+  file: File,
+  templateId: string = "studio_vocal",
+  params?: RepairRunParams,
+): Promise<SessionResult> {
   const fd = new FormData();
   fd.append("file", file);
   fd.append("template_id", templateId);
+  if (params?.enabled) fd.append("enabled_json", JSON.stringify(params.enabled));
+  if (params?.strengths) fd.append("strengths_json", JSON.stringify(params.strengths));
   return fetchJson("/process", { method: "POST", body: fd });
 }
 
-/** processSession —— 重新处理已有会话（后端同 /process，前端传同一个 file 即可）。 */
-export async function processSession(file: File, templateId: string): Promise<SessionResult> {
-  return createSession(file, templateId);
+/** processSession —— 重跑已有会话，接受 enabled/strengths。 */
+export async function processSession(
+  file: File,
+  templateId: string,
+  params?: RepairRunParams,
+): Promise<SessionResult> {
+  return createSession(file, templateId, params);
 }
 
 /** exportSession —— 下载导出文件（后端 /export 还没实现，走 Blob 占位）。 */
