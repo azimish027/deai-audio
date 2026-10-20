@@ -1,6 +1,7 @@
-import { Upload, Trash2, AudioLines } from "lucide-react";
+import { Upload, Trash2, AudioLines, GitCompare } from "lucide-react";
 import { useEngineStore } from "../../../stores/engineStore";
 import { useProjectStore } from "../../../stores/projectStore";
+import { useVersionStore } from "../../../stores/versionStore";
 
 /** 修复台左侧：ImportZone（拖入/选择文件）+ AudioSessionList。 */
 export function RepairLeftPanel() {
@@ -9,6 +10,7 @@ export function RepairLeftPanel() {
   const selectSession = useEngineStore((s) => s.selectSession);
   const removeSession = useEngineStore((s) => s.removeSession);
   const startRepair = useEngineStore((s) => s.startRepair);
+  const getSnapshots = useVersionStore((s) => s.getSnapshots);
 
   const onFile = (file: File) => {
     startRepair(file);
@@ -64,6 +66,7 @@ export function RepairLeftPanel() {
         <div className="space-y-1">
           {sessions.map((s) => {
             const active = selected_id === s.session_id;
+            const versionCount = getSnapshots(s.session_id).filter((v) => v.kind === 'after').length;
             return (
               <div
                 key={s.session_id}
@@ -76,15 +79,21 @@ export function RepairLeftPanel() {
                 <AudioLines className="w-3.5 h-3.5 text-notion-muted shrink-0" />
                 <div className="flex-1 min-w-0">
                   <div className="text-[12px] truncate">{s.input_name}</div>
-                  <div className="text-[11px] text-notion-muted flex gap-1.5">
+                  <div className="text-[11px] text-notion-muted flex gap-1.5 items-center">
                     <StatusDot status={s.status} />
                     <span>{statusLabel(s)}</span>
+                    {versionCount >= 2 && (
+                      <span className="flex items-center gap-0.5 text-[10px] text-notion-faint bg-notion-panel rounded px-1">
+                        <GitCompare className="w-2.5 h-2.5" />
+                        {versionCount}版
+                      </span>
+                    )}
                   </div>
                 </div>
                 <button
-                  onClick={(e) => { e.stopPropagation(); removeSession(s.session_id); }}
+                  onClick={(e) => { e.stopPropagation(); removeSession(s.session_id); useVersionStore.getState().clear(s.session_id); }}
                   className="opacity-0 group-hover:opacity-100 hover:text-notion-danger p-0.5"
-                  title="删除会话"
+                  title="删除会话 + 清理版本"
                 >
                   <Trash2 className="w-3 h-3" />
                 </button>

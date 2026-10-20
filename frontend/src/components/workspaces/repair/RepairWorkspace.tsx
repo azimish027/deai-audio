@@ -1,7 +1,10 @@
-import { AudioLines, Upload, Zap } from "lucide-react";
+import { AudioLines, Upload, Zap, ChevronDown, ChevronUp } from "lucide-react";
+import { useState } from "react";
 import { WaveformPlayer } from "../../WaveformPlayer";
 import { SegmentList } from "../../SegmentList";
 import { ExportBar } from "../../ExportBar";
+import { GaugeDashboard } from "../../metrics/GaugeDashboard";
+import { StepCards } from "../../metrics/StepCards";
 import { useEngineStore } from "../../../stores/engineStore";
 import { useUIStore } from "../../../stores/uiStore";
 import { NextStepCard } from "../_shared/NextStepCard";
@@ -11,6 +14,8 @@ export function RepairWorkspace() {
   const selected_id = useEngineStore((s) => s.selected_session_id);
   const sess = useEngineStore((s) => s.repair_sessions.find((x) => x.session_id === selected_id));
   const setWs = useUIStore((s) => s.setWorkspace);
+
+  const [stepsOpen, setStepsOpen] = useState(true);
 
   // ─── 空状态：没有选中的会话 ──────────────────────────────────
   if (!sess) {
@@ -38,17 +43,44 @@ export function RepairWorkspace() {
 
   // ─── 已处理完成 ─────────────────────────────────────────────
   const isDone = sess.status === "done";
+  const measurements = sess.measurements;
 
   return (
-    <div className="h-full overflow-auto p-4 sm:p-6 max-w-[1200px] mx-auto">
-      {/* 波形 */}
+    <div className="h-full overflow-auto p-4 sm:p-6 max-w-[1200px] mx-auto space-y-5">
+      {/* 波形 + A/B 切换 */}
       <WaveformPlayer
         inputUrl={sess.audio_url} altUrl={sess.processed_url}
         disabled={!isDone}
       />
 
+      {/* 处理后：仪表盘 + 步骤卡（Center 主区，一眼可见） */}
+      {isDone && measurements && (
+        <div className="space-y-3">
+          <GaugeDashboard
+            measurements={measurements}
+            diagnosis={sess.diagnosis as any}
+          />
+
+          {/* 步骤卡（可折叠） */}
+          <div className="notion-card p-3">
+            <button
+              className="w-full flex items-center justify-between text-[12px] font-medium text-notion-muted hover:text-notion-text-2"
+              onClick={() => setStepsOpen((o) => !o)}
+            >
+              <span>处理链每步动作（点击展开/收起）</span>
+              {stepsOpen ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+            </button>
+            {stepsOpen && (
+              <div className="mt-3">
+                <StepCards measurements={measurements} />
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* 分段 + 导出 + 引导 */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-4">
           <SegmentList segments={sess.segments.map((s) => ({
             start_s: s.start_s,
@@ -64,19 +96,17 @@ export function RepairWorkspace() {
             <div className="hidden lg:block">
               <NextStepCard steps={[
                 { label: "去拆解台分析和弦/调性", hint: "上传同一段音频，自动跑 beat tracking + K-S 调性检测", target: "reference", primary: true },
+                { label: "换模板重跑一轮", hint: "同一个音频，右侧换模板→意图预演→执行，形成 A/B 版本", target: "repair" },
                 { label: "继续修复另一段", hint: "从左侧面板新建会话", target: "repair" },
               ]} />
             </div>
           )}
         </div>
-        <div className="hidden lg:block text-[12px] text-notion-faint pt-1">
-          诊断详情在右侧面板
-        </div>
       </div>
 
       {/* 移动端底部引导 */}
       {isDone && (
-        <div className="lg:hidden mt-4">
+        <div className="lg:hidden">
           <NextStepCard steps={[
             { label: "去拆解台", hint: "下一步：分析和弦/调性", target: "reference", primary: true },
           ]} />
